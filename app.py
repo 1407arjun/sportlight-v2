@@ -1,5 +1,5 @@
 from multiprocessing.pool import ThreadPool
-from threading import Lock
+from multiprocessing import Lock
 
 from moviepy.editor import VideoFileClip
 
@@ -70,7 +70,7 @@ def create_dataframe(matrix, tokens):
     df = pd.DataFrame(data=matrix, index=doc_names, columns=tokens)
     return (df)
 
-def extract_text(segments: SegmentList, vid: VideoFileClip, start, end):
+def extract_text(l: Lock, segments, vid: VideoFileClip, start, end):
     global model
     # Create subclip
     clip = vid.subclip(start, end)
@@ -79,18 +79,41 @@ def extract_text(segments: SegmentList, vid: VideoFileClip, start, end):
     clip.audio.write_audiofile(path)
 
     # Transcribe audio
-    output = {}
+    output = {"text": "", "segments": []}
     try:
         output = model.transcribe(path)
         return output
-    except:
-        output = {"text": "", "segments": []}
+    finally:
+        # Add segments to the thread safe segment list
+        for i in output["segments"]:
+            l.acquire()
+            try:
+                segments.append({"text": i["text"], "start": i["start"], "end": i["end"]})
+            finally:
+                l.release()
 
-    # Add segments to the thread safe segment list
-    for i in output["segments"]:
-        segments.append(i["text"], i["start"], i["end"])
 
-def calculate_similarity():
+def calculate_similarity(l: Lock, result, segment):
+    d = [segment["text"], strings]
+    # Vectorize the strings
+    Tfidf_vect = TfidfVectorizer()
+    vector_matrix = Tfidf_vect.fit_transform(d)
+    tokens = Tfidf_vect.get_feature_names_out()
+    create_dataframe(vector_matrix.toarray(), tokens)
+
+    # Calculate cosine similarity score
+    cosine_similarity_matrix = cosine_similarity(vector_matrix)
+    r = create_dataframe(
+        cosine_similarity_matrix, ['Phrase', 'Strings'])
+    score = r['Phrase'].values[1]
+
+    # Accept as highlight if greater than threshold
+    if (score[i] >= 0.00500000000000):
+        l.acquire()
+        try:
+            result.append([segment["start"], segment["end"]])
+        finally:
+            l.release()
 
 
 if __name__ == "__main__":
@@ -98,7 +121,9 @@ if __name__ == "__main__":
     vid = VideoFileClip(SAMPLES_DIR + VIDEO_NAME)
     duration = vid.duration
 
-    segments = SegmentList()
+    segments = list()
+    # Create a lock to append to the segments extracted
+    sl = Lock()
     # Create the thread pool for extraction
     with ThreadPool() as pool:
         # No. of processes
@@ -113,4 +138,12 @@ if __name__ == "__main__":
         args[-1][1] -= excess
         print(args)
 
-        pool.starmap(extract_text, [tuple([segments, vid]) + tuple(i) for i in args])
+        pool.starmap(extract_text, [tuple([sl, segments, vid]) + tuple(i) for i in args])
+
+    result = list()
+    # Create a lock to append to the result
+    rl = Lock()
+    # Create the thread pool for similarity check
+    with ThreadPool() as pool:
+        # Chunk size calculated dynamically
+        pool.starmap(calculate_similarity, [tuple([rl, result]) + tuple(i) for i in segments])
