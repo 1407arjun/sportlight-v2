@@ -1,7 +1,9 @@
 from multiprocessing.pool import ThreadPool
 from multiprocessing import Lock
+import os, shutil
 
-from moviepy.editor import VideoFileClip
+from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
+from moviepy.editor import VideoFileClip, concatenate_videoclips
 
 import whisper
 
@@ -17,11 +19,23 @@ from sklearn.metrics.pairwise import cosine_similarity
 SAMPLES_DIR = "samples/"
 ETC_DIR = SAMPLES_DIR + "etc/"
 AUDIO_DIR = SAMPLES_DIR + "audio/"
+VIDEO_DIR = SAMPLES_DIR + "video/"
 OUT_DIR = SAMPLES_DIR + "out/"
 
+# Make fresh directories
+if os.path.exists(AUDIO_DIR):
+	shutil.rmtree(AUDIO_DIR)
+path=os.mkdir(AUDIO_DIR)
+if os.path.exists(VIDEO_DIR):
+	shutil.rmtree(VIDEO_DIR)
+path=os.mkdir(VIDEO_DIR)
+if os.path.exists(ETC_DIR):
+	shutil.rmtree(ETC_DIR)
+path=os.mkdir(ETC_DIR)
+
 # File constants
-VIDEO_NAME = "Untitled.mp4"
-AUDIO_NAME = "Untitled.wav"
+VIDEO_NAME = "video.mp4"
+AUDIO_NAME = "video.wav"
 
 model = whisper.load_model("base")
 nltk.download('wordnet')
@@ -48,22 +62,6 @@ for i in add:
             positive.append(lemma.name())
 
 strings = ' '.join(positive)
-class SegmentList:
-    def __init__(self):
-        # Initialize lists
-        self.text = list()
-        self.start = list()
-        self.end = list()
-
-        # Initialize lock
-        self.lock = Lock()
-
-    def append(self, text, start, end):
-        # Only thread with lock can append
-        with self.lock:
-            self.text.append(text)
-            self.start.append(start)
-            self.end.append(end)
 
 def create_dataframe(matrix, tokens):
     doc_names = [f'doc_{i+1}' for i, _ in enumerate(matrix)]
@@ -72,25 +70,33 @@ def create_dataframe(matrix, tokens):
 
 def extract_text(l: Lock, segments, vid: VideoFileClip, start, end):
     global model
-    # Create subclip
-    clip = vid.subclip(start, end)
-    # Save the subclip
-    path = f"{AUDIO_DIR}{str(int(start + end))}.mp3"
-    clip.audio.write_audiofile(path)
-
-    # Transcribe audio
-    output = {"text": "", "segments": []}
+    
     try:
-        output = model.transcribe(path)
-        return output
+        # Create subclip
+        clip = vid.subclip(start, end)
+        # Save subclip
+        path = f"{VIDEO_DIR}{str(int(start + end))}.mp4"
+        clip.write_videofile("gfg_intro.webm")
+        # Save the subclip audio
+        path = f"{AUDIO_DIR}{str(int(start + end))}.mp3"
+        clip.audio.write_audiofile(path)
+
+        # Transcribe audio
+        output = {"text": "", "segments": []}
+        try:
+            output = model.transcribe(path)
+            return output
+        finally:
+            # Add segments to the thread safe segment list
+            for i in output["segments"]:
+                l.acquire()
+                try:
+                    segments.append({"text": i["text"], "start": i["start"], "end": i["end"]})
+                finally:
+                    l.release()
     finally:
-        # Add segments to the thread safe segment list
-        for i in output["segments"]:
-            l.acquire()
-            try:
-                segments.append({"text": i["text"], "start": i["start"], "end": i["end"]})
-            finally:
-                l.release()
+        return
+
 
 
 def calculate_similarity(l: Lock, result, segment):
@@ -108,7 +114,7 @@ def calculate_similarity(l: Lock, result, segment):
     score = r['Phrase'].values[1]
 
     # Accept as highlight if greater than threshold
-    if (score[i] >= 0.00500000000000):
+    if (score >= 0.00100000000000):
         l.acquire()
         try:
             result.append([segment["start"], segment["end"]])
@@ -121,29 +127,60 @@ if __name__ == "__main__":
     vid = VideoFileClip(SAMPLES_DIR + VIDEO_NAME)
     duration = vid.duration
 
-    segments = list()
-    # Create a lock to append to the segments extracted
-    sl = Lock()
-    # Create the thread pool for extraction
-    with ThreadPool() as pool:
-        # No. of processes
-        np = pool._processes
-        # Chunk size
-        chunk = duration / np
-        # Excess time for overlaps
-        excess = 5
-        # Create partitions
-        args = [[chunk * (i) - excess, chunk * (i + 1) + excess] for i in range(np)]
-        args[0][0] += excess
-        args[-1][1] -= excess
-        print(args)
+    try:
+        segments = list()
+        # Create a lock to append to the segments extracted
+        sl = Lock()
+        # Create the thread pool for extraction
+        with ThreadPool() as pool:
+            # No. of processes
+            np = pool._processes
+            # Chunk size
+            chunk = duration / np
+            # Excess time for overlaps
+            excess = 5
+            # Create partitions
+            args = [[chunk * (i) - excess, chunk * (i + 1) + excess] for i in range(np)]
+            args[0][0] += excess
+            args[-1][1] -= excess
+            print(args)
 
-        pool.starmap(extract_text, [tuple([sl, segments, vid]) + tuple(i) for i in args])
+            pool.starmap(extract_text, [tuple([sl, segments, vid]) + tuple(i) for i in args])
 
-    result = list()
-    # Create a lock to append to the result
-    rl = Lock()
-    # Create the thread pool for similarity check
-    with ThreadPool() as pool:
-        # Chunk size calculated dynamically
-        pool.starmap(calculate_similarity, [tuple([rl, result]) + tuple(i) for i in segments])
+        result = list()
+        # Create a lock to append to the result
+        rl = Lock()
+        # Create the thread pool for similarity check
+        with ThreadPool() as pool:
+            # Chunk size calculated dynamically
+            pool.starmap(calculate_similarity, [tuple([rl, result, i]) for i in segments])
+
+        result = sorted(result)
+
+        # Merge adjacent results
+        res = [[result[0][0] - 4 if result[0][0] - 4 > 0 else 0, result[0][1] + 3]]
+        for i in range(1, len(result)):
+            if res[-1][1] + 3 >= result[i][0] - 4:
+                if res[-1][1] + 3 < result[i][1] + 3:
+                    res[-1][1] = result[i][1] + 3
+            else:
+                res.append([result[i][0] - 4 if result[i][0] - 4 > 0 else 0, result[i][1] + 3])
+
+        print(res)
+        
+        for i in range(len(res)):
+            filename="highlight" + str(i+1) + ".mp4"
+            ffmpeg_extract_subclip(SAMPLES_DIR+VIDEO_NAME,res[i][0],res[i][1],targetname=ETC_DIR+filename)
+        
+        files=os.listdir(ETC_DIR)
+        files=[ETC_DIR+"highlight" + str(i+1) + ".mp4" for i in range(len(res))]
+        final_clip=concatenate_videoclips([VideoFileClip(i) for i in files])
+        final_clip.write_videofile(OUT_DIR+VIDEO_NAME) #Enter the desired output highlights filename.
+    finally:
+        # Cleanup
+        if os.path.exists(AUDIO_DIR):
+            shutil.rmtree(AUDIO_DIR)
+        if os.path.exists(VIDEO_DIR):
+            shutil.rmtree(VIDEO_DIR)
+        if os.path.exists(ETC_DIR):
+            shutil.rmtree(ETC_DIR)
