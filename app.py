@@ -1,7 +1,17 @@
 from multiprocessing.pool import ThreadPool
-from moviepy.editor import VideoFileClip
 from threading import Lock
+
+from moviepy.editor import VideoFileClip
+
 import whisper
+
+import nltk
+from nltk.corpus import wordnet
+
+import pandas as pd
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Directory constants
 SAMPLES_DIR = "samples/"
@@ -14,8 +24,30 @@ VIDEO_NAME = "Untitled.mp4"
 AUDIO_NAME = "Untitled.wav"
 
 model = whisper.load_model("base")
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
+positive = list()
 
+# Words indicating highlights
+add = ["Straight", "biggie", "Cover", "OnDrive", "Square", "Forward", "stadium", "Defence", "Sweep", "Reverse",
+           "FrontFoot ", "LegGlance ", "BackFoot", "SquareCut", "Pull ", "Shot", "Hook", "Uppercut", "Cut", "Helicopter ", "SwitchHit",
+           "Dilscoop", "class", "bounce", "Upper", "Uppish", "Scoop ", "Inside", "Out", "Shots", "Bouncer", "Outswinger", "Inswinger",
+           "ReverseSwing", "played", "LegCutter", "OffCutter", "Yorker", "Slower", "Spin", "LegBreak ", "OffBreak", "Googly ",
+           "Doosra", "Topspin ", "CarromBall", "Slider", "ArmBall", "Infield", "InnerRing", "Outfield", "Catching", "Wicketkeeper",
+           "Slip", "Gully", "LegSlip", "LegGully", "Sillypoint", "Sillymidoff", "Shortleg", "Sillymidon", "InnerRing", "Point", "BackwardPoint",
+           "MidOff", "Cover", "MidOn", "SquareLeg", "Backward ", "SquareLeg", "MidWicket", "FineLeg", "Outfield", "ThirdMan",
+           "DeepPoint", "BackwardPoint", "ExtraCover", "LongOff", "FineLeg", "LongLeg", "LongOn", "Deep", "Cover", "played", "account"
+           "cricket", "hard", "sides", "man", "finishes", "one", "crucial", "Captain", "shot", "six", "four", "boundary", "line", "drive",
+           "celebrate", "placement", "beauty", "fifty", "century", "perfect", "magnifcient", "world", "cup", "batting", "fielding", "bowling",
+           "catch", "caught", "out", "stumped", "one", "bowled", "night", "final", "room", "taken", "edged", "wicket", "review", "DRS", "cuts", "out", "short"]
+
+for i in add:
+    for synset in wordnet.synsets(i):
+        for lemma in synset.lemmas():
+            positive.append(lemma.name())
+
+strings = ' '.join(positive)
 class SegmentList:
     def __init__(self):
         # Initialize lists
@@ -33,6 +65,10 @@ class SegmentList:
             self.start.append(start)
             self.end.append(end)
 
+def create_dataframe(matrix, tokens):
+    doc_names = [f'doc_{i+1}' for i, _ in enumerate(matrix)]
+    df = pd.DataFrame(data=matrix, index=doc_names, columns=tokens)
+    return (df)
 
 def extract_text(segments: SegmentList, vid: VideoFileClip, start, end):
     global model
@@ -53,6 +89,8 @@ def extract_text(segments: SegmentList, vid: VideoFileClip, start, end):
     # Add segments to the thread safe segment list
     for i in output["segments"]:
         segments.append(i["text"], i["start"], i["end"])
+
+def calculate_similarity():
 
 
 if __name__ == "__main__":
