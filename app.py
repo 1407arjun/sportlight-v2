@@ -66,26 +66,29 @@ def create_dataframe(matrix, tokens):
     df = pd.DataFrame(data=matrix, index=doc_names, columns=tokens)
     return (df)
 
-def extract_text(l: Lock, segments, audio, start, end):
+def extract_text(sl: Lock, ml: Lock, segments, audio, start, end):
     global model
     try:
         # Save the subclip audio
         path = f"{AUDIO_DIR}{str(int(start + end))}.wav"
         audio[start*1000: end*1000].export(path, format="wav")
 
-        # # Transcribe audio
-        # output = {"text": "", "segments": []}
-        # try:
-        #     model = whisper.load_model("base")
-        #     output = model.transcribe(path)
-        # finally:
-        #     # Add segments to the thread safe segment list
-        #     for i in output["segments"]:
-        #         l.acquire()
-        #         try:
-        #             segments.append({"text": i["text"], "start": i["start"], "end": i["end"]})
-        #         finally:
-        #             l.release()
+        # Transcribe audio
+        output = {"text": "", "segments": []}
+        ml.acquire()
+        try:
+            model = whisper.load_model("base")
+            output = model.transcribe(path)
+            print(path)
+        finally:
+            ml.release();
+            # Add segments to the thread safe segment list
+            for i in output["segments"]:
+                sl.acquire()
+                try:
+                    segments.append({"text": i["text"], "start": i["start"] + start, "end": i["end"] + start})
+                finally:
+                    sl.release()
     finally:
         return
 
@@ -128,34 +131,36 @@ if __name__ == "__main__":
         segments = list()
         # Create a lock to append to the segments extracted
         sl = Lock()
+        # Create a lock to run one model at a time
+        ml = Lock()
         # Create the thread pool for extraction
-        with ThreadPool() as pool:
+        with ThreadPool(4) as pool:
             # No. of processes
             np = pool._processes
             # Chunk size
             chunk = duration / np
             # Excess time for overlaps
-            excess = 5
-            # Create partitions
+            excess = 3
+            # Create partitions by taking excess
             args = [[chunk * (i) - excess, chunk * (i + 1) + excess] for i in range(np)]
             args[0][0] += excess
             args[-1][1] -= excess
             print(args)
 
-            pool.starmap(extract_text, [tuple([sl, segments, audio]) + tuple(i) for i in args])
+            pool.starmap(extract_text, [tuple([sl, ml, segments, audio]) + tuple(i) for i in args], chunksize=4)
 
-        for i in args:
-            path = f"{AUDIO_DIR}{str(int(i[0] + i[1]))}.wav"
-            model = whisper.load_model("base")
-            output = model.transcribe(path)
-            print(path)
+        # for i in args:
+        #     path = f"{AUDIO_DIR}{str(int(i[0] + i[1]))}.wav"
+        #     model = whisper.load_model("base")
+        #     output = model.transcribe(path)
+        #     print(path)
 
-            for j in output["segments"]:
-                sl.acquire()
-                try:
-                    segments.append({"text": j["text"], "start": j["start"] + i[0], "end": j["end"] + i[0]})
-                finally:
-                    sl.release()
+        #     for j in output["segments"]:
+        #         sl.acquire()
+        #         try:
+        #             segments.append({"text": j["text"], "start": j["start"] + i[0], "end": j["end"] + i[0]})
+        #         finally:
+        #             sl.release()
 
         print(segments)
         result = list()
@@ -192,9 +197,9 @@ if __name__ == "__main__":
     finally:
         print()
         # Cleanup
-        # if os.path.exists(AUDIO_DIR):
-        #     shutil.rmtree(AUDIO_DIR)
-        # if os.path.exists(VIDEO_DIR):
-        #     shutil.rmtree(VIDEO_DIR)
-        # if os.path.exists(ETC_DIR):
-        #     shutil.rmtree(ETC_DIR)
+        if os.path.exists(AUDIO_DIR):
+            shutil.rmtree(AUDIO_DIR)
+        if os.path.exists(VIDEO_DIR):
+            shutil.rmtree(VIDEO_DIR)
+        if os.path.exists(ETC_DIR):
+            shutil.rmtree(ETC_DIR)
